@@ -132,6 +132,26 @@ class TrackerAccountingTests(unittest.TestCase):
         tracker.observe(sample(90, last_input=-10))
         self.assertEqual(only_program(tracker.export_data(exported_at=BASE_WALL))["seconds"], 30.0)
 
+    def test_reset_updates_export_start_timestamp(self) -> None:
+        tracker = ActivityTracker(make_config(), started_at=BASE_WALL)
+        tracker.observe(sample(0, last_input=-10))
+        tracker.observe(sample(30, last_input=-10))
+
+        reset_time = BASE_WALL + timedelta(minutes=10)
+        tracker.reset(reset_at=reset_time)
+        snapshot = tracker.export_data(exported_at=reset_time)
+        self.assertEqual(snapshot["tracking_started_at"], reset_time.isoformat(timespec="seconds"))
+        self.assertEqual(snapshot["days"], [])
+
+    def test_five_second_sampling_limits_switch_interval_loss(self) -> None:
+        tracker = ActivityTracker(make_config(poll=5), started_at=BASE_WALL)
+        tracker.observe(sample(0, executable="Brave.exe", last_input=0))
+        tracker.observe(sample(5, executable="Cursor.exe", last_input=5))
+        tracker.observe(sample(10, executable="Cursor.exe", last_input=10))
+        data = tracker.export_data(exported_at=BASE_WALL)
+        self.assertEqual(data["days"][0]["programs"][0]["executable"], "Cursor.exe")
+        self.assertEqual(data["days"][0]["programs"][0]["seconds"], 5.0)
+
     def test_midnight_interval_is_split_between_local_dates(self) -> None:
         tracker = ActivityTracker(make_config())
         before_midnight = datetime(2026, 10, 25, 23, 59, 45, tzinfo=LOCAL)

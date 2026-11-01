@@ -14,7 +14,7 @@ class ConfigTests(unittest.TestCase):
             directory = Path(temporary)
             config = TrackerConfig.load(directory)
             self.assertTrue((directory / "config.json").exists())
-            self.assertEqual(config.poll_interval_seconds, 30)
+            self.assertEqual(config.poll_interval_seconds, 5)
             self.assertEqual(config.excluded_programs, frozenset())
 
     def test_names_and_aliases_are_case_insensitive(self) -> None:

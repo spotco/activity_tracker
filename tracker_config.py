@@ -10,7 +10,7 @@ from typing import Any
 
 
 DEFAULT_CONFIG: dict[str, Any] = {
-    "poll_interval_seconds": 30,
+    "poll_interval_seconds": 5,
     "idle_threshold_seconds": 300,
     "excluded_programs": [],
     "program_aliases": {
@@ -51,7 +51,7 @@ class TrackerConfig:
         if not isinstance(raw, dict):
             raise ConfigError("The top level of config.json must be a JSON object.")
 
-        poll = _integer(raw, "poll_interval_seconds", 30, minimum=1, maximum=3600)
+        poll = _integer(raw, "poll_interval_seconds", 5, minimum=1, maximum=3600)
         idle = _integer(raw, "idle_threshold_seconds", 300, minimum=1, maximum=86400)
 
         excluded_value = raw.get("excluded_programs", [])

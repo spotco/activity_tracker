@@ -104,8 +104,9 @@ class ActivityTracker:
                 sample.wall_time,
             )
 
-    def reset(self) -> None:
-        """Clear totals and baseline; the next sample only establishes a baseline."""
+    def reset(self, *, reset_at: datetime | None = None) -> None:
+        """Clear totals and establish a new, accurately dated tracking baseline."""
+        self.tracking_started_at = _aware(reset_at or datetime.now().astimezone())
         self._totals.clear()
         self._executables.clear()
         self._previous = None
