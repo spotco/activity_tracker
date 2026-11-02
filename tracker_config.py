@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -17,11 +18,55 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "GenshinImpact.exe": "Genshin Impact",
         "Cursor.exe": "Cursor",
     },
+    "browser_integration": {
+        "enabled": True,
+        "stale_observation_seconds": 15,
+        "browsers": {
+            "brave": "brave.exe",
+        },
+    },
 }
+
+
+@dataclass(frozen=True)
+class BrowserIntegrationConfig:
+    enabled: bool
+    stale_observation_seconds: int
+    browsers: dict[str, str]
+
+    @property
+    def executable_to_id(self) -> dict[str, str]:
+        return {
+            _executable_key(executable): browser_id
+            for browser_id, executable in self.browsers.items()
+        }
 
 
 class ConfigError(ValueError):
     """Raised when config.json is malformed or has invalid values."""
+
+
+def resolve_config_directory(anchor: Path | None = None) -> Path:
+    """Return the directory that holds config.json for this installation."""
+    override = os.environ.get("ACTIVITY_TRACKER_CONFIG_DIR", "").strip()
+    if override:
+        return Path(override).expanduser()
+    if getattr(sys, "frozen", False):
+        local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
+        if local_app_data:
+            return Path(local_app_data) / "ActivityTracker"
+    if anchor is not None:
+        return anchor.resolve().parent
+    return Path.cwd()
+
+
+def ensure_installation_config(config_dir: Path) -> None:
+    """Create %LOCALAPPDATA%\\ActivityTracker\\config.json for packaged hosts when missing."""
+    config_dir.mkdir(parents=True, exist_ok=True)
+    path = config_dir / "config.json"
+    if path.exists():
+        return
+    path.write_bytes((json.dumps(DEFAULT_CONFIG, indent=2) + "\n").encode("utf-8"))
 
 
 @dataclass(frozen=True)
@@ -30,10 +75,20 @@ class TrackerConfig:
     idle_threshold_seconds: int
     excluded_programs: frozenset[str]
     program_aliases: dict[str, str]
+    browser_integration: BrowserIntegrationConfig = field(
+        default_factory=lambda: BrowserIntegrationConfig(
+            False,
+            DEFAULT_CONFIG["browser_integration"]["stale_observation_seconds"],
+            dict(DEFAULT_CONFIG["browser_integration"]["browsers"]),
+        )
+    )
 
     @classmethod
-    def load(cls, script_dir: Path) -> "TrackerConfig":
-        path = script_dir / "config.json"
+    def load(cls, script_dir: Path | None = None, *, anchor: Path | None = None) -> "TrackerConfig":
+        directory = script_dir if script_dir is not None else resolve_config_directory(anchor)
+        if getattr(sys, "frozen", False):
+            ensure_installation_config(directory)
+        path = directory / "config.json"
         if not path.exists():
             try:
                 path.write_text(
@@ -72,7 +127,45 @@ class TrackerConfig:
                 raise ConfigError(f"Alias for {executable!r} must be a non-empty display name.")
             aliases[_executable_key(executable)] = name.strip()
 
-        return cls(poll, idle, excluded, aliases)
+        browser_integration = _browser_integration(raw.get("browser_integration", DEFAULT_CONFIG["browser_integration"]))
+
+        return cls(poll, idle, excluded, aliases, browser_integration)
+
+
+def _browser_integration(raw: Any) -> BrowserIntegrationConfig:
+    if raw is None:
+        raw = DEFAULT_CONFIG["browser_integration"]
+    if not isinstance(raw, dict):
+        raise ConfigError("browser_integration must be a JSON object.")
+
+    enabled = raw.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise ConfigError("browser_integration.enabled must be true or false.")
+
+    stale = _integer(raw, "stale_observation_seconds", 15, minimum=1, maximum=3600)
+
+    browsers_value = raw.get("browsers", {"brave": "brave.exe"})
+    if not isinstance(browsers_value, dict) or not browsers_value:
+        raise ConfigError("browser_integration.browsers must be a non-empty JSON object.")
+    browsers: dict[str, str] = {}
+    executable_ids: dict[str, str] = {}
+    for browser_id, executable in browsers_value.items():
+        if not isinstance(browser_id, str) or not browser_id.strip():
+            raise ConfigError("Every browser_integration.browsers key must be a non-empty browser id.")
+        if not isinstance(executable, str) or not executable.strip():
+            raise ConfigError(f"Browser {browser_id!r} must map to a non-empty executable name.")
+        normalized_id = browser_id.strip().casefold()
+        executable_key = _executable_key(executable)
+        previous_id = executable_ids.get(executable_key)
+        if previous_id is not None and previous_id != normalized_id:
+            raise ConfigError(
+                "browser_integration.browsers must map each executable to at most one browser id "
+                f"(duplicate {executable_key!r})."
+            )
+        executable_ids[executable_key] = normalized_id
+        browsers[normalized_id] = os.path.basename(executable.strip())
+
+    return BrowserIntegrationConfig(enabled, stale, browsers)
 
 
 def _integer(raw: dict[str, Any], key: str, default: int, *, minimum: int, maximum: int) -> int:

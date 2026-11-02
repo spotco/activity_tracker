@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Activity Tracker</title>
+    <style>
+      body {
+        font: 13px/1.4 Segoe UI, sans-serif;
+        margin: 12px;
+        min-width: 260px;
+      }
+      .status {
+        font-weight: 600;
+        margin-bottom: 8px;
+      }
+      .hostname {
+        font-family: Consolas, monospace;
+        margin-bottom: 10px;
+      }
+      .privacy {
+        color: #444;
+        font-size: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="status" class="status">Checking native host…</div>
+    <div id="hostname" class="hostname">hostname: unknown</div>
+    <div id="extension-id" class="privacy"></div>
+    <div id="debug" class="privacy"></div>
+    <p class="privacy">
+      Debug: brave://extensions → this extension → <strong>Extension options</strong>.
+    </p>
+    <p class="privacy">
+      Sends only the focused tab hostname to your local Activity Tracker. No full URLs,
+      page content, history, or timing totals leave the browser.
+    </p>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

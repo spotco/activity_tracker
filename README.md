@@ -59,6 +59,12 @@ Edit `config.json` before launch. Values are loaded once at startup.
 
 Invalid JSON or values are shown in a startup error dialog. Unknown configuration keys are ignored so the structure can be extended later.
 
+Optional browser integration settings live under `browser_integration`:
+
+- `enabled`: when false, hostname labeling is disabled but export schema remains version 2.
+- `stale_observation_seconds`: default 15; browser labels older than this at a poll are treated as unknown.
+- `browsers`: maps a browser id (for example `brave`) to an executable name (for example `brave.exe`).
+
 The default exclusion list is empty, so all identifiable foreground applications are included, including terminals and browsers. The tracker process itself, intervals without an identifiable foreground process, locked-desktop intervals, AFK time past the grace period, and long sleep/delay gaps remain untracked.
 
 ## Accounting and limitations
@@ -73,12 +79,73 @@ The default exclusion list is empty, so all identifiable foreground applications
 - Nothing is saved automatically. Reset clears the in-memory totals **and updates `tracking_started_at` to the reset time**; exiting loses all unexported data. There is no database, network activity, telemetry, or API integration.
 - The JSON is a versioned export of observations, not a Life & Games database record and does not infer whether activity was gaming, productive, intentional, or debugging.
 
+## Brave hostname labeling (optional extension)
+
+When enabled, a local Manifest V3 extension reports **only the hostname of the focused non-incognito tab** in Brave. Full URLs, titles, page content, history, keystrokes, and incognito tabs are never collected. Hostnames stay distinct (`docs.google.com` is not merged into `google.com`).
+
+Windows foreground sampling remains the only source of credited seconds. Extension messages provide labels only. Uncertain or stale labels appear as `domain_unknown` **inside** already-counted Brave time; they do not add extra seconds.
+
+### Install the extension and native host
+
+1. Start the tracker (`activity_tracker.pyw` or the CLI standalone session).
+2. In Brave, open `brave://extensions`, enable **Developer mode**, and **Load unpacked** pointing at the `browser_extension` folder in this repository.
+3. Copy the extension id shown on the card (32 lowercase letters).
+4. Build the native host executable (requires PyInstaller once):
+
+   ```powershell
+   .\scripts\build_native_host.ps1
+   ```
+
+5. Register the native host for your extension id (HKCU only; no admin):
+
+   ```powershell
+   .\scripts\install_host.ps1 -ExtensionId YOUR_EXTENSION_ID_HERE
+   ```
+   The installer copies `dist\activity_tracker_native_host.exe` into `%LOCALAPPDATA%\ActivityTracker\native_host\` and registers that `.exe` path (Brave/Chrome on Windows reject `.cmd` hosts). This Brave build reads `HKCU\Software\Google\Chrome\NativeMessagingHosts`, so that is the key the installer writes.
+
+   Setup, the registry discovery failure, and startup behavior are written up in [docs/brave_plugin.md](docs/brave_plugin.md).
+
+6. Reload the extension if needed. Open the extension popup; it should show **Native host: connected** while the tracker is running.
+
+### Export schema version 2
+
+Exports use `"schema_version": 2`. Daily `days[].programs[]` entries keep the same fields as before. Browser programs may include nested `browser_domains[]` with per-hostname seconds plus `domain_unknown`. Each day may also include `hours[]` with the same program breakdown keyed by local `hour_start` timestamps (including UTC offset) so repeated DST hours do not merge.
+
+Example semantics for one day:
+
+```text
+brave.exe: 45 minutes credited
+  github.com: 20 minutes
+  chatgpt.com: 15 minutes
+  domain_unknown: 10 minutes
+```
+
+The 45 minutes are total Brave foreground time, not 45 plus website minutes.
+
+### Privacy and security
+
+- Native messaging uses Chromium's length-prefixed JSON on stdin/stdout. The host forwards validated state to the existing per-user named pipe; it does not upload data.
+- `install_host.ps1` allowlists exactly one extension id. Do not use wildcard origins.
+- Uninstall with `.\scripts\uninstall_host.ps1`.
+
+### Manual Brave smoke test
+
+1. Start the tracker and confirm the extension popup reports a connected native host.
+2. Focus Brave on `https://github.com` for at least two poll intervals (10 seconds at the default 5-second poll).
+3. Switch to `https://chatgpt.com` for another two intervals.
+4. Switch foreground to Cursor (or another app) for two intervals.
+5. Export JSON via `py -3.11 activity_tracker_cli.py export .\smoke.json --overwrite` (while the tray app runs) or from the tray viewer.
+6. Confirm `brave.exe` totals match the sum of `browser_domains` seconds (including `domain_unknown`) for each day/hour, and that `github.com` and `chatgpt.com` appear as separate hostnames when labeling was stable across both poll endpoints.
+
+Automated unit tests do not replace this interactive Brave check.
+
 ## Tests
 
 Run the platform-independent accounting tests with:
 
 ```powershell
 py -3.11 -m unittest discover -s tests -v
+node --test tests/js/test_hostname.mjs
 ```
 
 The tests use synthetic timestamps and do not generate keyboard or mouse input. The Win32 calls, tray icon, dialogs, and locked-desktop behavior require a Windows interactive desktop for a GUI smoke test.

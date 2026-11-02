@@ -122,12 +122,55 @@ def desktop_locked() -> bool | None:
         user32.CloseDesktop(handle)
 
 
+def windows_monotonic_seconds() -> float:
+    """Return the same monotonic clock domain used for activity samples."""
+    return int(kernel32.GetTickCount64()) / 1000.0
+
+
+_LOCAL_TIMEZONE = None
+
+
+_WINDOWS_TZ_TO_IANA: dict[str, str] = {
+    "Eastern Standard Time": "America/New_York",
+    "Central Standard Time": "America/Chicago",
+    "Mountain Standard Time": "America/Denver",
+    "Pacific Standard Time": "America/Los_Angeles",
+    "Alaskan Standard Time": "America/Anchorage",
+    "Hawaiian Standard Time": "Pacific/Honolulu",
+    "GMT Standard Time": "Europe/London",
+    "Central European Standard Time": "Europe/Berlin",
+}
+
+
+def local_timezone():
+    """Return the Windows IANA timezone when available (DST-aware)."""
+    global _LOCAL_TIMEZONE
+    if _LOCAL_TIMEZONE is not None:
+        return _LOCAL_TIMEZONE
+    try:
+        from zoneinfo import ZoneInfo
+        import winreg
+
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"SYSTEM\CurrentControlSet\Control\TimeZoneInformation",
+        ) as key:
+            name, _ = winreg.QueryValueEx(key, "TimeZoneKeyName")
+        iana_name = _WINDOWS_TZ_TO_IANA.get(str(name), str(name))
+        _LOCAL_TIMEZONE = ZoneInfo(iana_name)
+    except Exception:
+        _LOCAL_TIMEZONE = datetime.now().astimezone().tzinfo
+    return _LOCAL_TIMEZONE
+
+
+def local_wall_time() -> datetime:
+    return datetime.now(local_timezone())
+
+
 def take_sample() -> ActivitySample:
     """Collect one best-effort sample; failed fields result in no credit."""
-    # GetTickCount64 aligns with LASTINPUTINFO's timestamp and lets the core
-    # detect suspend gaps against the wall-clock sample.
-    mono = int(kernel32.GetTickCount64()) / 1000.0
-    wall = datetime.now().astimezone()
+    mono = windows_monotonic_seconds()
+    wall = local_wall_time()
     try:
         executable = foreground_executable()
     except Exception:

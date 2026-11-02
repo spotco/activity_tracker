@@ -14,12 +14,18 @@ from typing import Callable
 
 from tracker_config import ConfigError, TrackerConfig
 from tracker_core import ActivityTracker
+from tracker_browser import BrowserStateStore
 from tracker_ipc import AgentChannelUnavailable, AgentCommandServer, send_agent_command
+from tracker_sampling import (
+    build_status_response,
+    ingest_browser_state_request,
+    observe_with_browser_context,
+    reset_tracker_state,
+)
 from windows_api import (
     acquire_single_instance_mutex,
     kernel32,
     release_single_instance_mutex,
-    take_sample,
 )
 
 
@@ -38,12 +44,14 @@ class TrackerCommands:
         input_fn: Input = input,
         show_callback: Callable[[], None] | None = None,
         lock: threading.RLock | None = None,
+        browser_store: BrowserStateStore | None = None,
     ) -> None:
         self.tracker = tracker
         self.output = output
         self.input = input_fn
         self.show_callback = show_callback or (lambda: None)
         self.lock = lock or threading.RLock()
+        self.browser_store = browser_store or BrowserStateStore()
 
     def execute(self, line: str) -> bool:
         """Run one command. Return False only when the CLI should exit."""
@@ -58,21 +66,7 @@ class TrackerCommands:
             )
         elif command == "status":
             with self.lock:
-                snapshot = self.tracker.export_data()
-            programs = [program for day in snapshot["days"] for program in day["programs"]]
-            self._json(
-                {
-                    "ok": True,
-                    "command": "status",
-                    "running": True,
-                    "tracking_started_at": snapshot["tracking_started_at"],
-                    "poll_interval_seconds": snapshot["poll_interval_seconds"],
-                    "idle_threshold_seconds": snapshot["idle_threshold_seconds"],
-                    "day_count": len(snapshot["days"]),
-                    "program_count": len(programs),
-                    "tracked_seconds": round(sum(item["seconds"] for item in programs), 3),
-                }
-            )
+                self._json(build_status_response(self.tracker, self.browser_store, self.tracker.config))
         elif command in {"show", "view"}:
             # Keep view as an alias, but never dump the activity records into
             # the terminal. The popup is created on Tk's main thread.
@@ -86,7 +80,7 @@ class TrackerCommands:
                 self._json({"ok": False, "command": "reset", "cancelled": True})
             else:
                 with self.lock:
-                    self.tracker.reset()
+                    reset_tracker_state(self.tracker, self.browser_store, self.lock)
                 self._json({"ok": True, "command": "reset", "cleared": True})
         elif command in {"exit", "quit"}:
             self._json({"ok": True, "command": "exit", "message": "Unexported data will be lost."})
@@ -129,10 +123,12 @@ class TrackerWindow:
         tracker: ActivityTracker,
         lock: threading.RLock,
         requests: queue.Queue[str],
+        browser_store: BrowserStateStore,
     ) -> None:
         self.root = root
         self.tracker = tracker
         self.lock = lock
+        self.browser_store = browser_store
         self.requests = requests
         self.viewer: tk.Toplevel | None = None
         self.viewer_text: tk.Text | None = None
@@ -245,7 +241,7 @@ class TrackerWindow:
             parent=self.root,
         ):
             with self.lock:
-                self.tracker.reset()
+                reset_tracker_state(self.tracker, self.browser_store, self.lock)
 
 
 def _parse_command(line: str) -> tuple[str, str]:
@@ -262,16 +258,15 @@ def _parse_command(line: str) -> tuple[str, str]:
 def _sampling_loop(
     tracker: ActivityTracker,
     config: TrackerConfig,
+    browser_store: BrowserStateStore,
     lock: threading.RLock,
     stop_event: threading.Event,
 ) -> None:
+    browser_store.stale_observation_seconds = float(config.browser_integration.stale_observation_seconds)
     while not stop_event.is_set():
         try:
-            observation = take_sample()
-            with lock:
-                tracker.observe(observation)
+            observe_with_browser_context(tracker, browser_store, config, lock)
         except Exception:
-            # A single failed Win32 query or sample must not end collection.
             pass
         stop_event.wait(config.poll_interval_seconds)
 
@@ -315,28 +310,19 @@ def _start_tray(requests: queue.Queue[str]):
 def _standalone_agent_handler(
     request: dict,
     tracker: ActivityTracker,
+    browser_store: BrowserStateStore,
     lock: threading.RLock,
     requests: queue.Queue[str],
 ) -> dict:
     """Handle agent commands for a tracker launched in interactive CLI mode."""
     command = str(request.get("command", "")).casefold()
+    if command == "browser_state":
+        return ingest_browser_state_request(request, browser_store, tracker.config, lock)
     if command == "ping":
         return {"ok": True, "command": "ping", "running": True}
     if command == "status":
         with lock:
-            snapshot = tracker.export_data()
-        programs = [program for day in snapshot["days"] for program in day["programs"]]
-        return {
-            "ok": True,
-            "command": "status",
-            "running": True,
-            "tracking_started_at": snapshot["tracking_started_at"],
-            "poll_interval_seconds": snapshot["poll_interval_seconds"],
-            "idle_threshold_seconds": snapshot["idle_threshold_seconds"],
-            "day_count": len(snapshot["days"]),
-            "program_count": len(programs),
-            "tracked_seconds": round(sum(item["seconds"] for item in programs), 3),
-        }
+            return build_status_response(tracker, browser_store, tracker.config)
     if command in {"show", "view"}:
         requests.put("show")
         return {"ok": True, "command": "show", "popup_requested": True}
@@ -349,7 +335,7 @@ def _standalone_agent_handler(
                 "message": "Use reset --yes to clear all in-memory tracked data.",
             }
         with lock:
-            tracker.reset()
+            reset_tracker_state(tracker, browser_store, lock)
         return {"ok": True, "command": "reset", "cleared": True}
     if command == "export":
         argument = str(request.get("path", "")).strip()
@@ -505,9 +491,12 @@ def main(arguments: list[str] | None = None) -> int:
         root = tk.Tk()
         root.withdraw()
         tracker = ActivityTracker(config, started_at=launched_at)
+        browser_store = BrowserStateStore(
+            stale_observation_seconds=float(config.browser_integration.stale_observation_seconds)
+        )
         lock = threading.RLock()
         requests: queue.Queue[str] = queue.Queue()
-        window = TrackerWindow(root, tracker, lock, requests)
+        window = TrackerWindow(root, tracker, lock, requests, browser_store)
         output_lock = threading.Lock()
 
         def output(text: str) -> None:
@@ -519,15 +508,16 @@ def main(arguments: list[str] | None = None) -> int:
             output=output,
             show_callback=lambda: requests.put("show"),
             lock=lock,
+            browser_store=browser_store,
         )
         agent_server = AgentCommandServer(
-            lambda request: _standalone_agent_handler(request, tracker, lock, requests)
+            lambda request: _standalone_agent_handler(request, tracker, browser_store, lock, requests)
         )
         agent_server.start()
         stop_event = threading.Event()
         sampler = threading.Thread(
             target=_sampling_loop,
-            args=(tracker, config, lock, stop_event),
+            args=(tracker, config, browser_store, lock, stop_event),
             name="activity-sampler",
             daemon=True,
         )

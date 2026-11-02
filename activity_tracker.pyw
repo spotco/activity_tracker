@@ -17,12 +17,18 @@ from PIL import Image, ImageDraw
 
 from tracker_config import ConfigError, TrackerConfig
 from tracker_core import ActivityTracker
+from tracker_browser import BrowserStateStore
 from tracker_ipc import AgentCommandServer
+from tracker_sampling import (
+    build_status_response,
+    ingest_browser_state_request,
+    make_observation,
+    reset_tracker_state,
+)
 from windows_api import (
     acquire_single_instance_mutex,
     release_single_instance_mutex,
     show_windows_error,
-    take_sample,
 )
 
 
@@ -45,6 +51,10 @@ class TrackerApplication:
         self.config = config
         self.mutex_handle = mutex_handle
         self.tracker = ActivityTracker(config, started_at=started_at)
+        self.browser_store = BrowserStateStore(
+            stale_observation_seconds=float(config.browser_integration.stale_observation_seconds)
+        )
+        self.lock = threading.RLock()
         self.commands: queue.Queue[Any] = queue.Queue()
         self.viewer: tk.Toplevel | None = None
         self.viewer_text: tk.Text | None = None
@@ -83,7 +93,8 @@ class TrackerApplication:
         if not self.running:
             return
         try:
-            self.tracker.observe(take_sample())
+            with self.lock:
+                self.tracker.observe(make_observation(self.tracker, self.browser_store, self.config))
         except Exception as exc:
             # A malformed observation or transient Win32 failure should not
             # terminate the tray application. A fresh observation will reset
@@ -130,6 +141,13 @@ class TrackerApplication:
         self.root.after(500, self._process_commands)
 
     def _dispatch_agent_command(self, payload: dict[str, Any]) -> dict[str, Any]:
+        if str(payload.get("command", "")).casefold() == "browser_state":
+            return ingest_browser_state_request(
+                payload,
+                self.browser_store,
+                self.config,
+                self.lock,
+            )
         if str(payload.get("command", "")).casefold() == "ping":
             return {"ok": True, "command": "ping", "running": True}
         request = _AgentRequest(payload)
@@ -141,19 +159,8 @@ class TrackerApplication:
     def _handle_agent_command(self, payload: dict[str, Any]) -> dict[str, Any]:
         command = str(payload.get("command", "")).casefold()
         if command == "status":
-            snapshot = self.tracker.export_data()
-            programs = [program for day in snapshot["days"] for program in day["programs"]]
-            return {
-                "ok": True,
-                "command": "status",
-                "running": True,
-                "tracking_started_at": snapshot["tracking_started_at"],
-                "poll_interval_seconds": snapshot["poll_interval_seconds"],
-                "idle_threshold_seconds": snapshot["idle_threshold_seconds"],
-                "day_count": len(snapshot["days"]),
-                "program_count": len(programs),
-                "tracked_seconds": round(sum(item["seconds"] for item in programs), 3),
-            }
+            with self.lock:
+                return build_status_response(self.tracker, self.browser_store, self.config)
         if command in {"show", "view"}:
             self.open_viewer()
             return {"ok": True, "command": "show", "popup_requested": True}
@@ -165,7 +172,7 @@ class TrackerApplication:
                     "confirmation_required": True,
                     "message": "Use reset --yes to clear all in-memory tracked data.",
                 }
-            self.tracker.reset()
+            reset_tracker_state(self.tracker, self.browser_store, self.lock)
             return {"ok": True, "command": "reset", "cleared": True}
         if command == "export":
             argument = str(payload.get("path", "")).strip()
@@ -298,7 +305,7 @@ class TrackerApplication:
             "Clear all accumulated activity data? This cannot be undone.",
             parent=self.root,
         ):
-            self.tracker.reset()
+            reset_tracker_state(self.tracker, self.browser_store, self.lock)
 
     def shutdown(self) -> None:
         if not self.running:

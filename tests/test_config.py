@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from tracker_config import ConfigError, TrackerConfig
+from tracker_config import ConfigError, TrackerConfig, ensure_installation_config
 
 
 class ConfigTests(unittest.TestCase):
@@ -42,6 +42,35 @@ class ConfigTests(unittest.TestCase):
             path.write_text('{"poll_interval_seconds": 0}', encoding="utf-8")
             with self.assertRaises(ConfigError):
                 TrackerConfig.load(Path(temporary))
+
+    def test_duplicate_browser_executable_mappings_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "config.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "browser_integration": {
+                            "enabled": True,
+                            "browsers": {"brave": "brave.exe", "chrome": "Brave.EXE"},
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaises(ConfigError):
+                TrackerConfig.load(Path(temporary))
+
+    def test_tracker_config_accepts_original_four_positional_arguments(self) -> None:
+        config = TrackerConfig(30, 300, frozenset(), {})
+        self.assertFalse(config.browser_integration.enabled)
+        self.assertEqual(config.browser_integration.browsers["brave"], "brave.exe")
+
+    def test_ensure_installation_config_writes_utf8_without_bom(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            ensure_installation_config(directory)
+            raw = (directory / "config.json").read_bytes()
+            self.assertFalse(raw.startswith(b"\xef\xbb\xbf"))
 
 
 if __name__ == "__main__":

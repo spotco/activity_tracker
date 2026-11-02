@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 from activity_tracker_cli import TrackerCommands, _parse_command
-from tracker_config import TrackerConfig
+from tracker_config import ConfigError, TrackerConfig
 from tracker_core import ActivitySample, ActivityTracker
 
 

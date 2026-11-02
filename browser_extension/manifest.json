@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "Activity Tracker Browser Labels",
+  "version": "1.0.0",
+  "description": "Sends focused-tab hostnames to the local Activity Tracker. No URLs, history, or timing.",
+  "permissions": ["tabs", "windows", "nativeMessaging", "alarms"],
+  "host_permissions": ["http://*/*", "https://*/*"],
+  "options_ui": {
+    "page": "debug.html",
+    "open_in_tab": true
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Activity Tracker",
+    "default_popup": "popup.html"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "activity-tracker-labels@local"
+    }
+  }
+}

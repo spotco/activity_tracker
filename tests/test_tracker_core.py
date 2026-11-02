@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import unittest
 
-from tracker_config import TrackerConfig
+from tracker_config import BrowserIntegrationConfig, TrackerConfig
 from tracker_core import ActivitySample, ActivityTracker
 
 
@@ -18,12 +18,18 @@ def make_config(
     idle: int = 300,
     excluded: tuple[str, ...] = (),
     aliases: dict[str, str] | None = None,
+    browser_enabled: bool = False,
 ) -> TrackerConfig:
     return TrackerConfig(
         poll_interval_seconds=poll,
         idle_threshold_seconds=idle,
         excluded_programs=frozenset(name.casefold() for name in excluded),
         program_aliases={key.casefold(): value for key, value in (aliases or {}).items()},
+        browser_integration=BrowserIntegrationConfig(
+            enabled=browser_enabled,
+            stale_observation_seconds=15,
+            browsers={"brave": "brave.exe"},
+        ),
     )
 
 
@@ -185,7 +191,7 @@ class TrackerAccountingTests(unittest.TestCase):
     def test_json_schema_serializes_empty_and_nonempty_snapshots(self) -> None:
         tracker = ActivityTracker(make_config(), started_at=BASE_WALL)
         empty = json.loads(json.dumps(tracker.export_data(exported_at=BASE_WALL)))
-        self.assertEqual(empty["schema_version"], 1)
+        self.assertEqual(empty["schema_version"], 2)
         self.assertEqual(empty["source"], "windows_foreground_tracker")
         self.assertEqual(empty["days"], [])
         self.assertIn("-04:00", empty["tracking_started_at"])
